@@ -1,0 +1,62 @@
+services:
+  db:
+    build:
+      context: ./database
+      dockerfile: Dockerfile
+    container_name: dispatch-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: passWrd
+      POSTGRES_DB: dispatchdb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U root -d dispatchdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - dispatch-db-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      default:
+        aliases:
+          - db-service
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: dispatch-backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PORT: 5000
+      DB_HOST: db-service
+      DB_PORT: 5432
+      DB_USER: root
+      DB_PASSWORD: passWrd
+      DB_NAME: dispatchdb
+    ports:
+      - "5000:5000"
+    networks:
+      default:
+        aliases:
+          - backend-service
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: dispatch-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_started
+    ports:
+      - "8080:80"
+
+volumes:
+  dispatch-db-data:

@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-deployment
+  labels:
+    app: dispatch-frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: dispatch-frontend
+  template:
+    metadata:
+      labels:
+        app: dispatch-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: dispatch-frontend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
