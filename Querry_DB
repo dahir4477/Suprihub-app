@@ -1,0 +1,27 @@
+Use kubectl + psql inside the Postgres pod.
+
+Quick way (inside DB pod)
+If you used the manifests as created (deployment name db-deployment, db dispatchdb, user root):
+
+kubectl exec -it deploy/db-deployment -- psql -U root -d dispatchdb
+Then run SQL:
+
+\dt
+SELECT * FROM submissions ORDER BY id DESC LIMIT 20;
+SELECT COUNT(*) FROM submissions;
+Exit with:
+
+\q
+One-liner (no interactive shell)
+kubectl exec -it deploy/db-deployment -- psql -U root -d dispatchdb -c "SELECT id,name,email,message,created_at FROM submissions ORDER BY id DESC LIMIT 20;"
+If you use a namespace
+Add -n <namespace> to all commands, for example:
+
+kubectl -n dispatch exec -it deploy/db-deployment -- psql -U root -d dispatchdb -c "SELECT COUNT(*) FROM submissions;"
+If deployment name differs, find the DB pod first
+kubectl get pods
+kubectl get pods -l app=dispatch-db
+Then:
+
+kubectl exec -it <db-pod-name> -- psql -U root -d dispatchdb
+If you want, I can also give you commands to verify persistence after restart (delete db pod -> check rows still exist).
