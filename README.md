@@ -149,3 +149,33 @@ If count is still present, persistence is working through `PersistentVolume` + `
 - Frontend and backend deployments run with multiple replicas.
 - Database is single-replica and stateful via PVC.
 - Ingress manifest is included as a placeholder for future external routing.
+
+---
+
+## 9) Jenkins CI Pipeline
+
+This project includes a declarative pipeline at `Jenkinsfile`.
+
+Recommended Jenkins job setup:
+
+1. Create a **Pipeline** job.
+2. Configure **Pipeline script from SCM** and point to this repository.
+3. Set script path to `Jenkinsfile`.
+4. Ensure Jenkins agent has `node`, `npm`, `docker`, and `docker compose`.
+
+Pipeline stages:
+
+- Checkout source
+- Install frontend/backend dependencies
+- Build frontend bundle and verify backend syntax
+- Build Docker images for frontend/backend/database
+- Run compose smoke test (`UI -> API -> DB`)
+- Optional Docker Hub push (parameter-driven)
+
+If pushing images:
+
+- Add Jenkins credential (Username/Password) with ID `dockerhub-creds`
+  - or set a different credential ID via `DOCKERHUB_CREDENTIALS_ID`
+- Run with:
+  - `PUSH_IMAGES=true`
+  - `DOCKERHUB_NAMESPACE=<your-dockerhub-username-or-org>`
