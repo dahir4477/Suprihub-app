@@ -8,6 +8,21 @@ pipeline {
   }
 
   parameters {
+    string(
+      name: "GIT_REPO_URL",
+      defaultValue: "",
+      description: "Optional Git repository URL for inline Pipeline jobs (leave empty for Pipeline script from SCM/Multibranch)."
+    )
+    string(
+      name: "GIT_BRANCH",
+      defaultValue: "main",
+      description: "Git branch to checkout when GIT_REPO_URL is provided."
+    )
+    string(
+      name: "GIT_CREDENTIALS_ID",
+      defaultValue: "",
+      description: "Optional Jenkins credentials ID for private Git repository checkout."
+    )
     booleanParam(
       name: "PUSH_IMAGES",
       defaultValue: false,
@@ -39,7 +54,42 @@ pipeline {
   stages {
     stage("Checkout") {
       steps {
-        checkout scm
+        script {
+          def scmCheckedOut = false
+
+          try {
+            checkout scm
+            scmCheckedOut = true
+            echo "Checked out via Jenkins SCM context."
+          } catch (err) {
+            echo "SCM context checkout not available: ${err.getMessage()}"
+          }
+
+          if (!scmCheckedOut) {
+            if (params.GIT_REPO_URL?.trim()) {
+              echo "Checking out from GIT_REPO_URL for inline Pipeline job."
+              def remoteConfig = [url: params.GIT_REPO_URL.trim()]
+              if (params.GIT_CREDENTIALS_ID?.trim()) {
+                remoteConfig.credentialsId = params.GIT_CREDENTIALS_ID.trim()
+              }
+              checkout([
+                $class: "GitSCM",
+                branches: [[name: "*/${params.GIT_BRANCH}"]],
+                userRemoteConfigs: [remoteConfig]
+              ])
+              scmCheckedOut = true
+            } else if (fileExists("docker-compose.yml") && fileExists("frontend/package.json") && fileExists("backend/package.json")) {
+              echo "Using pre-populated workspace content."
+              scmCheckedOut = true
+            }
+          }
+
+          if (!scmCheckedOut) {
+            error(
+              "No source code available. Use either Pipeline script from SCM/Multibranch, or set GIT_REPO_URL (and optional GIT_CREDENTIALS_ID) for inline jobs."
+            )
+          }
+        }
       }
     }
 
@@ -71,9 +121,17 @@ pipeline {
             dir("frontend") {
               script {
                 if (isUnix()) {
-                  sh "npm ci"
+                  if (fileExists("package-lock.json")) {
+                    sh "npm ci"
+                  } else {
+                    sh "npm install"
+                  }
                 } else {
-                  bat "npm ci"
+                  if (fileExists("package-lock.json")) {
+                    bat "npm ci"
+                  } else {
+                    bat "npm install"
+                  }
                 }
               }
             }
@@ -84,9 +142,17 @@ pipeline {
             dir("backend") {
               script {
                 if (isUnix()) {
-                  sh "npm ci"
+                  if (fileExists("package-lock.json")) {
+                    sh "npm ci"
+                  } else {
+                    sh "npm install"
+                  }
                 } else {
-                  bat "npm ci"
+                  if (fileExists("package-lock.json")) {
+                    bat "npm ci"
+                  } else {
+                    bat "npm install"
+                  }
                 }
               }
             }
@@ -201,10 +267,14 @@ pipeline {
   post {
     always {
       script {
-        if (isUnix()) {
-          sh "docker compose down -v || true"
+        if (fileExists("docker-compose.yml")) {
+          if (isUnix()) {
+            sh "docker compose down -v || true"
+          } else {
+            bat "docker compose down -v"
+          }
         } else {
-          bat "docker compose down -v"
+          echo "Skipping docker compose cleanup (docker-compose.yml not found in workspace)."
         }
       }
     }
