@@ -1,5 +1,5 @@
 # Dispatch Application (Microservices + Kubernetes)
-
+# Please read this ReadMe documentation for More inforamtion
 This project is a production-style dispatch application split into three microservices:
 
 - `frontend` (React UI served by NGINX)
