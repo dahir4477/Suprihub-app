@@ -7,9 +7,52 @@ def notifySlack(String stageName, String status, String color) {
 
     try {
         slackSend(channel: env.SLACK_CHANNEL, color: color, message: message)
-    } catch (Exception err) {
+    } catch (Throwable err) {
         echo "Slack notification failed for ${stageName}: ${err.getMessage()}"
     }
+}
+
+boolean hasChangeSets() {
+    for (def changeSet in currentBuild.changeSets) {
+        if (changeSet.items.length > 0) {
+            return true
+        }
+    }
+
+    return false
+}
+
+boolean changedIn(List<String> pathPrefixes) {
+    if (!hasChangeSets()) {
+        echo 'No Jenkins change set was available, so conditional stages will run.'
+        return true
+    }
+
+    List<String> normalizedPrefixes = pathPrefixes.collect { prefix ->
+        String normalized = prefix.replace('\\', '/')
+        normalized = normalized.startsWith('./') ? normalized.substring(2) : normalized
+        return normalized.endsWith('/') ? normalized : "${normalized}/"
+    }
+
+    for (def changeSet in currentBuild.changeSets) {
+        for (def item in changeSet.items) {
+            for (def affectedFile in item.affectedFiles) {
+                String path = affectedFile.path.replace('\\', '/')
+
+                for (String prefix in normalizedPrefixes) {
+                    if (path == prefix[0..-2] || path.startsWith(prefix)) {
+                        return true
+                    }
+                }
+            }
+        }
+    }
+
+    return false
+}
+
+boolean appOrPipelineChanged(List<String> pathPrefixes) {
+    return changedIn(pathPrefixes + ['Jenkinsfile'])
 }
 
 pipeline {
@@ -23,6 +66,7 @@ pipeline {
         SLACK_CHANNEL = '#all-cicd'
         IMAGE_NAME_BACKEND = 'suprihub/dispatch-backend'
         IMAGE_NAME_FRONTEND = 'suprihub/dispatch-frontend'
+        IMAGE_NAME_DATABASE = 'suprihub/dispatch-db'
     }
 
     options {
@@ -62,7 +106,10 @@ pipeline {
             }
         }
 
-        stage('Build') {
+        stage('Setup Node.js') {
+            when {
+                expression { appOrPipelineChanged(['backend/', 'frontend/']) }
+            }
             steps {
                 script {
                     if (isUnix()) {
@@ -96,26 +143,7 @@ pipeline {
                             echo "========== Verifying Node.js and npm =========="
                             node --version
                             npm --version
-
-                            echo "========== Installing backend dependencies =========="
-                            npm --prefix backend ci --prefer-offline
-
-                            echo "========== Installing frontend dependencies =========="
-                            npm --prefix frontend ci --prefer-offline
-
-                            echo "========== Building frontend application =========="
-                            npm --prefix frontend run build
-
-                            echo "========== Verifying build artifacts =========="
-                            if [ -d "frontend/dist" ] && [ -n "$(find frontend/dist -type f -print -quit)" ]; then
-                                echo "Frontend build successful"
-                                echo "Build artifacts: $(find frontend/dist -type f | wc -l) files"
-                            else
-                                echo "Frontend build failed - dist directory empty or missing"
-                                exit 1
-                            fi
-
-                            echo "========== Build Stage Completed =========="
+                            echo "========== Node.js Setup Completed =========="
                         '''
                     } else {
                         bat '''
@@ -129,34 +157,135 @@ pipeline {
 
                             node --version
                             npm --version
-
-                            echo ========== Installing backend dependencies ==========
-                            npm --prefix backend ci --prefer-offline
-                            if errorlevel 1 exit /b 1
-
-                            echo ========== Installing frontend dependencies ==========
-                            npm --prefix frontend ci --prefer-offline
-                            if errorlevel 1 exit /b 1
-
-                            echo ========== Building frontend application ==========
-                            npm --prefix frontend run build
-                            if errorlevel 1 exit /b 1
-
-                            echo ========== Verifying build artifacts ==========
-                            if not exist "frontend\\dist" (
-                                echo Frontend build failed - dist directory missing.
-                                exit /b 1
-                            )
-
-                            dir /b "frontend\\dist" >nul 2>nul
-                            if errorlevel 1 (
-                                echo Frontend build failed - dist directory empty.
-                                exit /b 1
-                            )
-
-                            echo Frontend build successful.
-                            echo ========== Build Stage Completed ==========
+                            echo ========== Node.js Setup Completed ==========
                         '''
+                    }
+                }
+            }
+            post {
+                success {
+                    script {
+                        notifySlack('Setup Node.js', 'SUCCESS', 'good')
+                    }
+                }
+                failure {
+                    script {
+                        notifySlack('Setup Node.js', 'FAILURE', 'danger')
+                    }
+                }
+            }
+        }
+
+        stage('Build') {
+            parallel {
+                stage('Backend Dependencies') {
+                    when {
+                        expression { appOrPipelineChanged(['backend/']) }
+                    }
+                    steps {
+                        script {
+                            if (isUnix()) {
+                                sh '''
+                                    set -eu
+                                    export PATH="${NODE_DIR}/bin:${PATH}"
+
+                                    echo "========== Installing backend dependencies =========="
+                                    npm --prefix backend ci --prefer-offline
+                                    echo "========== Backend Dependencies Completed =========="
+                                '''
+                            } else {
+                                bat '''
+                                    @echo off
+                                    echo ========== Installing backend dependencies ==========
+                                    npm --prefix backend ci --prefer-offline
+                                    if errorlevel 1 exit /b 1
+                                    echo ========== Backend Dependencies Completed ==========
+                                '''
+                            }
+                        }
+                    }
+                    post {
+                        success {
+                            script {
+                                notifySlack('Backend Dependencies', 'SUCCESS', 'good')
+                            }
+                        }
+                        failure {
+                            script {
+                                notifySlack('Backend Dependencies', 'FAILURE', 'danger')
+                            }
+                        }
+                    }
+                }
+
+                stage('Frontend Build') {
+                    when {
+                        expression { appOrPipelineChanged(['frontend/']) }
+                    }
+                    steps {
+                        script {
+                            if (isUnix()) {
+                                sh '''
+                                    set -eu
+                                    export PATH="${NODE_DIR}/bin:${PATH}"
+
+                                    echo "========== Installing frontend dependencies =========="
+                                    npm --prefix frontend ci --prefer-offline
+
+                                    echo "========== Building frontend application =========="
+                                    npm --prefix frontend run build
+
+                                    echo "========== Verifying build artifacts =========="
+                                    if [ -d "frontend/dist" ] && [ -n "$(find frontend/dist -type f -print -quit)" ]; then
+                                        echo "Frontend build successful"
+                                        echo "Build artifacts: $(find frontend/dist -type f | wc -l) files"
+                                    else
+                                        echo "Frontend build failed - dist directory empty or missing"
+                                        exit 1
+                                    fi
+
+                                    echo "========== Frontend Build Completed =========="
+                                '''
+                            } else {
+                                bat '''
+                                    @echo off
+                                    echo ========== Installing frontend dependencies ==========
+                                    npm --prefix frontend ci --prefer-offline
+                                    if errorlevel 1 exit /b 1
+
+                                    echo ========== Building frontend application ==========
+                                    npm --prefix frontend run build
+                                    if errorlevel 1 exit /b 1
+
+                                    echo ========== Verifying build artifacts ==========
+                                    if not exist "frontend\\dist" (
+                                        echo Frontend build failed - dist directory missing.
+                                        exit /b 1
+                                    )
+
+                                    dir /b "frontend\\dist" >nul 2>nul
+                                    if errorlevel 1 (
+                                        echo Frontend build failed - dist directory empty.
+                                        exit /b 1
+                                    )
+
+                                    echo Frontend build successful.
+                                    echo ========== Frontend Build Completed ==========
+                                '''
+                            }
+                        }
+                    }
+                    post {
+                        success {
+                            script {
+                                notifySlack('Frontend Build', 'SUCCESS', 'good')
+                            }
+                        }
+                        failure {
+                            script {
+                                notifySlack('Frontend Build', 'FAILURE', 'danger')
+                            }
+                        }
                     }
                 }
             }
@@ -177,6 +306,9 @@ pipeline {
         stage('Test') {
             parallel {
                 stage('Backend Tests') {
+                    when {
+                        expression { appOrPipelineChanged(['backend/']) }
+                    }
                     steps {
                         script {
                             if (isUnix()) {
@@ -266,6 +398,9 @@ pipeline {
                 }
 
                 stage('Frontend Tests') {
+                    when {
+                        expression { appOrPipelineChanged(['frontend/']) }
+                    }
                     steps {
                         script {
                             if (isUnix()) {
@@ -355,6 +490,9 @@ pipeline {
         }
 
         stage('Security Scan') {
+            when {
+                expression { appOrPipelineChanged(['backend/', 'frontend/', 'database/']) }
+            }
             steps {
                 script {
                     if (isUnix()) {
@@ -422,57 +560,146 @@ pipeline {
         }
 
         stage('Code Quality') {
-            steps {
-                script {
-                    if (isUnix()) {
-                        sh '''
-                            set -eu
+            parallel {
+                stage('Backend Code Quality') {
+                    when {
+                        expression { appOrPipelineChanged(['backend/']) }
+                    }
+                    steps {
+                        script {
+                            if (isUnix()) {
+                                sh '''
+                                    set -eu
 
-                            echo "========== Code Quality Checks =========="
+                                    echo "========== Backend Code Quality Checks =========="
+                                    test -f backend/index.js
+                                    test -f backend/db.js
+                                    test -f backend/package.json
+                                    test -f backend/package-lock.json
+                                    test -f backend/Dockerfile
+                                    test -f docker-compose.yml
+                                    echo "========== Backend Code Quality Completed =========="
+                                '''
+                            } else {
+                                bat '''
+                                    @echo off
+                                    echo ========== Backend Code Quality Checks ==========
+                                    if not exist "backend\\index.js" exit /b 1
+                                    if not exist "backend\\db.js" exit /b 1
+                                    if not exist "backend\\package.json" exit /b 1
+                                    if not exist "backend\\package-lock.json" exit /b 1
+                                    if not exist "backend\\Dockerfile" exit /b 1
+                                    if not exist "docker-compose.yml" exit /b 1
+                                    echo ========== Backend Code Quality Completed ==========
+                                '''
+                            }
+                        }
+                    }
+                    post {
+                        success {
+                            script {
+                                notifySlack('Backend Code Quality', 'SUCCESS', 'good')
+                            }
+                        }
+                        failure {
+                            script {
+                                notifySlack('Backend Code Quality', 'FAILURE', 'danger')
+                            }
+                        }
+                    }
+                }
 
-                            test -f backend/index.js
-                            test -f backend/db.js
-                            test -f backend/package.json
-                            test -f backend/package-lock.json
-                            test -f backend/Dockerfile
+                stage('Frontend Code Quality') {
+                    when {
+                        expression { appOrPipelineChanged(['frontend/']) }
+                    }
+                    steps {
+                        script {
+                            if (isUnix()) {
+                                sh '''
+                                    set -eu
 
-                            test -f frontend/src/App.jsx
-                            test -f frontend/src/main.jsx
-                            test -f frontend/package.json
-                            test -f frontend/package-lock.json
-                            test -f frontend/Dockerfile
-                            test -f frontend/nginx.conf
-                            test -d frontend/dist
+                                    echo "========== Frontend Code Quality Checks =========="
+                                    test -f frontend/src/App.jsx
+                                    test -f frontend/src/main.jsx
+                                    test -f frontend/package.json
+                                    test -f frontend/package-lock.json
+                                    test -f frontend/Dockerfile
+                                    test -f frontend/nginx.conf
+                                    test -d frontend/dist
+                                    test -f docker-compose.yml
+                                    echo "========== Frontend Code Quality Completed =========="
+                                '''
+                            } else {
+                                bat '''
+                                    @echo off
+                                    echo ========== Frontend Code Quality Checks ==========
+                                    if not exist "frontend\\src\\App.jsx" exit /b 1
+                                    if not exist "frontend\\src\\main.jsx" exit /b 1
+                                    if not exist "frontend\\package.json" exit /b 1
+                                    if not exist "frontend\\package-lock.json" exit /b 1
+                                    if not exist "frontend\\Dockerfile" exit /b 1
+                                    if not exist "frontend\\nginx.conf" exit /b 1
+                                    if not exist "frontend\\dist" exit /b 1
+                                    if not exist "docker-compose.yml" exit /b 1
+                                    echo ========== Frontend Code Quality Completed ==========
+                                '''
+                            }
+                        }
+                    }
+                    post {
+                        success {
+                            script {
+                                notifySlack('Frontend Code Quality', 'SUCCESS', 'good')
+                            }
+                        }
+                        failure {
+                            script {
+                                notifySlack('Frontend Code Quality', 'FAILURE', 'danger')
+                            }
+                        }
+                    }
+                }
 
-                            test -f docker-compose.yml
+                stage('Database Code Quality') {
+                    when {
+                        expression { appOrPipelineChanged(['database/']) }
+                    }
+                    steps {
+                        script {
+                            if (isUnix()) {
+                                sh '''
+                                    set -eu
 
-                            echo "Required application files are present."
-                            echo "========== Code Quality Checks Completed =========="
-                        '''
-                    } else {
-                        bat '''
-                            @echo off
-                            echo ========== Code Quality Checks ==========
-
-                            if not exist "backend\\index.js" exit /b 1
-                            if not exist "backend\\db.js" exit /b 1
-                            if not exist "backend\\package.json" exit /b 1
-                            if not exist "backend\\package-lock.json" exit /b 1
-                            if not exist "backend\\Dockerfile" exit /b 1
-
-                            if not exist "frontend\\src\\App.jsx" exit /b 1
-                            if not exist "frontend\\src\\main.jsx" exit /b 1
-                            if not exist "frontend\\package.json" exit /b 1
-                            if not exist "frontend\\package-lock.json" exit /b 1
-                            if not exist "frontend\\Dockerfile" exit /b 1
-                            if not exist "frontend\\nginx.conf" exit /b 1
-                            if not exist "frontend\\dist" exit /b 1
-
-                            if not exist "docker-compose.yml" exit /b 1
-
-                            echo Required application files are present.
-                            echo ========== Code Quality Checks Completed ==========
-                        '''
+                                    echo "========== Database Code Quality Checks =========="
+                                    test -f database/Dockerfile
+                                    test -f database/init.sql
+                                    test -f docker-compose.yml
+                                    echo "========== Database Code Quality Completed =========="
+                                '''
+                            } else {
+                                bat '''
+                                    @echo off
+                                    echo ========== Database Code Quality Checks ==========
+                                    if not exist "database\\Dockerfile" exit /b 1
+                                    if not exist "database\\init.sql" exit /b 1
+                                    if not exist "docker-compose.yml" exit /b 1
+                                    echo ========== Database Code Quality Completed ==========
+                                '''
+                            }
+                        }
+                    }
+                    post {
+                        success {
+                            script {
+                                notifySlack('Database Code Quality', 'SUCCESS', 'good')
+                            }
+                        }
+                        failure {
+                            script {
+                                notifySlack('Database Code Quality', 'FAILURE', 'danger')
+                            }
+                        }
                     }
                 }
             }
@@ -490,90 +717,310 @@ pipeline {
             }
         }
 
-        stage('Package') {
+        stage('Kubernetes Manifests') {
+            when {
+                expression { appOrPipelineChanged(['k8s/']) }
+            }
             steps {
                 script {
                     if (isUnix()) {
                         sh '''
                             set -eu
 
-                            echo "========== Docker Image Packaging =========="
+                            echo "========== Kubernetes Manifest Validation =========="
+                            test -f k8s/configs/backend-configmap.yaml
+                            test -f k8s/configs/db-secret.yaml
+                            test -f k8s/deployments/backend-deployment.yaml
+                            test -f k8s/deployments/db-deployment.yaml
+                            test -f k8s/deployments/frontend-deployment.yaml
+                            test -f k8s/services/backend-service.yaml
+                            test -f k8s/services/db-service.yaml
+                            test -f k8s/services/frontend-service.yaml
+                            test -f k8s/storage/pv.yaml
+                            test -f k8s/storage/pvc.yaml
 
-                            if ! command -v docker >/dev/null 2>&1; then
-                                echo "Docker is not installed or not on PATH."
-                                exit 1
-                            fi
-
-                            docker --version
-
-                            echo "Building backend Docker image..."
-                            docker build \
-                                --build-arg NODE_ENV=production \
-                                --label "build.number=${BUILD_NUMBER}" \
-                                --label "build.timestamp=${BUILD_TIMESTAMP}" \
-                                -t "${IMAGE_NAME_BACKEND}:${BUILD_NUMBER}" \
-                                -t "${IMAGE_NAME_BACKEND}:latest" \
-                                -f backend/Dockerfile \
-                                backend
-
-                            echo "Building frontend Docker image..."
-                            docker build \
-                                --label "build.number=${BUILD_NUMBER}" \
-                                --label "build.timestamp=${BUILD_TIMESTAMP}" \
-                                -t "${IMAGE_NAME_FRONTEND}:${BUILD_NUMBER}" \
-                                -t "${IMAGE_NAME_FRONTEND}:latest" \
-                                -f frontend/Dockerfile \
-                                frontend
-
-                            docker images "${IMAGE_NAME_BACKEND}" --format "table {{.Repository}}\\t{{.Tag}}\\t{{.ID}}\\t{{.Size}}"
-                            docker images "${IMAGE_NAME_FRONTEND}" --format "table {{.Repository}}\\t{{.Tag}}\\t{{.ID}}\\t{{.Size}}"
-
-                            if command -v trivy >/dev/null 2>&1; then
-                                trivy image --severity HIGH,CRITICAL --exit-code 1 "${IMAGE_NAME_BACKEND}:${BUILD_NUMBER}"
-                                trivy image --severity HIGH,CRITICAL --exit-code 1 "${IMAGE_NAME_FRONTEND}:${BUILD_NUMBER}"
+                            if command -v kubectl >/dev/null 2>&1; then
+                                kubectl apply --dry-run=client -R -f k8s
                             else
-                                echo "Trivy not installed - skipping image vulnerability scan."
+                                echo "kubectl not installed - completed file presence validation only."
                             fi
 
-                            echo "========== Docker Packaging Completed =========="
+                            echo "========== Kubernetes Manifest Validation Completed =========="
                         '''
                     } else {
                         bat '''
                             @echo off
-                            echo ========== Docker Image Packaging ==========
+                            echo ========== Kubernetes Manifest Validation ==========
+                            if not exist "k8s\\configs\\backend-configmap.yaml" exit /b 1
+                            if not exist "k8s\\configs\\db-secret.yaml" exit /b 1
+                            if not exist "k8s\\deployments\\backend-deployment.yaml" exit /b 1
+                            if not exist "k8s\\deployments\\db-deployment.yaml" exit /b 1
+                            if not exist "k8s\\deployments\\frontend-deployment.yaml" exit /b 1
+                            if not exist "k8s\\services\\backend-service.yaml" exit /b 1
+                            if not exist "k8s\\services\\db-service.yaml" exit /b 1
+                            if not exist "k8s\\services\\frontend-service.yaml" exit /b 1
+                            if not exist "k8s\\storage\\pv.yaml" exit /b 1
+                            if not exist "k8s\\storage\\pvc.yaml" exit /b 1
 
-                            docker --version
+                            where kubectl >nul 2>nul
                             if errorlevel 1 (
-                                echo Docker is not installed or not on PATH.
-                                exit /b 1
+                                echo kubectl not installed - completed file presence validation only.
+                            ) else (
+                                kubectl apply --dry-run=client -R -f k8s
+                                if errorlevel 1 exit /b 1
                             )
 
-                            echo Building backend Docker image...
-                            docker build ^
-                                --build-arg NODE_ENV=production ^
-                                --label "build.number=%BUILD_NUMBER%" ^
-                                --label "build.timestamp=%BUILD_TIMESTAMP%" ^
-                                -t "%IMAGE_NAME_BACKEND%:%BUILD_NUMBER%" ^
-                                -t "%IMAGE_NAME_BACKEND%:latest" ^
-                                -f backend\\Dockerfile ^
-                                backend
-                            if errorlevel 1 exit /b 1
-
-                            echo Building frontend Docker image...
-                            docker build ^
-                                --label "build.number=%BUILD_NUMBER%" ^
-                                --label "build.timestamp=%BUILD_TIMESTAMP%" ^
-                                -t "%IMAGE_NAME_FRONTEND%:%BUILD_NUMBER%" ^
-                                -t "%IMAGE_NAME_FRONTEND%:latest" ^
-                                -f frontend\\Dockerfile ^
-                                frontend
-                            if errorlevel 1 exit /b 1
-
-                            docker images "%IMAGE_NAME_BACKEND%"
-                            docker images "%IMAGE_NAME_FRONTEND%"
-
-                            echo ========== Docker Packaging Completed ==========
+                            echo ========== Kubernetes Manifest Validation Completed ==========
                         '''
+                    }
+                }
+            }
+            post {
+                success {
+                    script {
+                        notifySlack('Kubernetes Manifests', 'SUCCESS', 'good')
+                    }
+                }
+                failure {
+                    script {
+                        notifySlack('Kubernetes Manifests', 'FAILURE', 'danger')
+                    }
+                }
+            }
+        }
+
+        stage('Package') {
+            parallel {
+                stage('Backend Docker Image') {
+                    when {
+                        expression { appOrPipelineChanged(['backend/']) }
+                    }
+                    steps {
+                        script {
+                            if (isUnix()) {
+                                sh '''
+                                    set -eu
+
+                                    echo "========== Backend Docker Image Packaging =========="
+
+                                    if ! command -v docker >/dev/null 2>&1; then
+                                        echo "Docker is not installed or not on PATH."
+                                        exit 1
+                                    fi
+
+                                    docker --version
+
+                                    docker build \
+                                        --build-arg NODE_ENV=production \
+                                        --label "build.number=${BUILD_NUMBER}" \
+                                        --label "build.timestamp=${BUILD_TIMESTAMP}" \
+                                        -t "${IMAGE_NAME_BACKEND}:${BUILD_NUMBER}" \
+                                        -t "${IMAGE_NAME_BACKEND}:latest" \
+                                        -f backend/Dockerfile \
+                                        backend
+
+                                    docker images "${IMAGE_NAME_BACKEND}" --format "table {{.Repository}}\\t{{.Tag}}\\t{{.ID}}\\t{{.Size}}"
+
+                                    if command -v trivy >/dev/null 2>&1; then
+                                        trivy image --severity HIGH,CRITICAL --exit-code 1 "${IMAGE_NAME_BACKEND}:${BUILD_NUMBER}"
+                                    else
+                                        echo "Trivy not installed - skipping backend image vulnerability scan."
+                                    fi
+
+                                    echo "========== Backend Docker Packaging Completed =========="
+                                '''
+                            } else {
+                                bat '''
+                                    @echo off
+                                    echo ========== Backend Docker Image Packaging ==========
+
+                                    docker --version
+                                    if errorlevel 1 (
+                                        echo Docker is not installed or not on PATH.
+                                        exit /b 1
+                                    )
+
+                                    docker build ^
+                                        --build-arg NODE_ENV=production ^
+                                        --label "build.number=%BUILD_NUMBER%" ^
+                                        --label "build.timestamp=%BUILD_TIMESTAMP%" ^
+                                        -t "%IMAGE_NAME_BACKEND%:%BUILD_NUMBER%" ^
+                                        -t "%IMAGE_NAME_BACKEND%:latest" ^
+                                        -f backend\\Dockerfile ^
+                                        backend
+                                    if errorlevel 1 exit /b 1
+
+                                    docker images "%IMAGE_NAME_BACKEND%"
+                                    echo ========== Backend Docker Packaging Completed ==========
+                                '''
+                            }
+                        }
+                    }
+                    post {
+                        success {
+                            script {
+                                notifySlack('Backend Docker Image', 'SUCCESS', 'good')
+                            }
+                        }
+                        failure {
+                            script {
+                                notifySlack('Backend Docker Image', 'FAILURE', 'danger')
+                            }
+                        }
+                    }
+                }
+
+                stage('Frontend Docker Image') {
+                    when {
+                        expression { appOrPipelineChanged(['frontend/']) }
+                    }
+                    steps {
+                        script {
+                            if (isUnix()) {
+                                sh '''
+                                    set -eu
+
+                                    echo "========== Frontend Docker Image Packaging =========="
+
+                                    if ! command -v docker >/dev/null 2>&1; then
+                                        echo "Docker is not installed or not on PATH."
+                                        exit 1
+                                    fi
+
+                                    docker --version
+
+                                    docker build \
+                                        --label "build.number=${BUILD_NUMBER}" \
+                                        --label "build.timestamp=${BUILD_TIMESTAMP}" \
+                                        -t "${IMAGE_NAME_FRONTEND}:${BUILD_NUMBER}" \
+                                        -t "${IMAGE_NAME_FRONTEND}:latest" \
+                                        -f frontend/Dockerfile \
+                                        frontend
+
+                                    docker images "${IMAGE_NAME_FRONTEND}" --format "table {{.Repository}}\\t{{.Tag}}\\t{{.ID}}\\t{{.Size}}"
+
+                                    if command -v trivy >/dev/null 2>&1; then
+                                        trivy image --severity HIGH,CRITICAL --exit-code 1 "${IMAGE_NAME_FRONTEND}:${BUILD_NUMBER}"
+                                    else
+                                        echo "Trivy not installed - skipping frontend image vulnerability scan."
+                                    fi
+
+                                    echo "========== Frontend Docker Packaging Completed =========="
+                                '''
+                            } else {
+                                bat '''
+                                    @echo off
+                                    echo ========== Frontend Docker Image Packaging ==========
+
+                                    docker --version
+                                    if errorlevel 1 (
+                                        echo Docker is not installed or not on PATH.
+                                        exit /b 1
+                                    )
+
+                                    docker build ^
+                                        --label "build.number=%BUILD_NUMBER%" ^
+                                        --label "build.timestamp=%BUILD_TIMESTAMP%" ^
+                                        -t "%IMAGE_NAME_FRONTEND%:%BUILD_NUMBER%" ^
+                                        -t "%IMAGE_NAME_FRONTEND%:latest" ^
+                                        -f frontend\\Dockerfile ^
+                                        frontend
+                                    if errorlevel 1 exit /b 1
+
+                                    docker images "%IMAGE_NAME_FRONTEND%"
+                                    echo ========== Frontend Docker Packaging Completed ==========
+                                '''
+                            }
+                        }
+                    }
+                    post {
+                        success {
+                            script {
+                                notifySlack('Frontend Docker Image', 'SUCCESS', 'good')
+                            }
+                        }
+                        failure {
+                            script {
+                                notifySlack('Frontend Docker Image', 'FAILURE', 'danger')
+                            }
+                        }
+                    }
+                }
+
+                stage('Database Docker Image') {
+                    when {
+                        expression { appOrPipelineChanged(['database/']) }
+                    }
+                    steps {
+                        script {
+                            if (isUnix()) {
+                                sh '''
+                                    set -eu
+
+                                    echo "========== Database Docker Image Packaging =========="
+
+                                    if ! command -v docker >/dev/null 2>&1; then
+                                        echo "Docker is not installed or not on PATH."
+                                        exit 1
+                                    fi
+
+                                    docker --version
+
+                                    docker build \
+                                        --label "build.number=${BUILD_NUMBER}" \
+                                        --label "build.timestamp=${BUILD_TIMESTAMP}" \
+                                        -t "${IMAGE_NAME_DATABASE}:${BUILD_NUMBER}" \
+                                        -t "${IMAGE_NAME_DATABASE}:latest" \
+                                        -f database/Dockerfile \
+                                        database
+
+                                    docker images "${IMAGE_NAME_DATABASE}" --format "table {{.Repository}}\\t{{.Tag}}\\t{{.ID}}\\t{{.Size}}"
+
+                                    if command -v trivy >/dev/null 2>&1; then
+                                        trivy image --severity HIGH,CRITICAL --exit-code 1 "${IMAGE_NAME_DATABASE}:${BUILD_NUMBER}"
+                                    else
+                                        echo "Trivy not installed - skipping database image vulnerability scan."
+                                    fi
+
+                                    echo "========== Database Docker Packaging Completed =========="
+                                '''
+                            } else {
+                                bat '''
+                                    @echo off
+                                    echo ========== Database Docker Image Packaging ==========
+
+                                    docker --version
+                                    if errorlevel 1 (
+                                        echo Docker is not installed or not on PATH.
+                                        exit /b 1
+                                    )
+
+                                    docker build ^
+                                        --label "build.number=%BUILD_NUMBER%" ^
+                                        --label "build.timestamp=%BUILD_TIMESTAMP%" ^
+                                        -t "%IMAGE_NAME_DATABASE%:%BUILD_NUMBER%" ^
+                                        -t "%IMAGE_NAME_DATABASE%:latest" ^
+                                        -f database\\Dockerfile ^
+                                        database
+                                    if errorlevel 1 exit /b 1
+
+                                    docker images "%IMAGE_NAME_DATABASE%"
+                                    echo ========== Database Docker Packaging Completed ==========
+                                '''
+                            }
+                        }
+                    }
+                    post {
+                        success {
+                            script {
+                                notifySlack('Database Docker Image', 'SUCCESS', 'good')
+                            }
+                        }
+                        failure {
+                            script {
+                                notifySlack('Database Docker Image', 'FAILURE', 'danger')
+                            }
+                        }
                     }
                 }
             }
@@ -592,6 +1039,9 @@ pipeline {
         }
 
         stage('Archive') {
+            when {
+                expression { appOrPipelineChanged(['frontend/']) }
+            }
             steps {
                 script {
                     if (isUnix()) {
@@ -616,10 +1066,12 @@ Docker Images
 =============
 Backend Image: ${IMAGE_NAME_BACKEND}:${BUILD_NUMBER}
 Frontend Image: ${IMAGE_NAME_FRONTEND}:${BUILD_NUMBER}
+Database Image: ${IMAGE_NAME_DATABASE}:${BUILD_NUMBER}
 EOF
 
                             docker images "${IMAGE_NAME_BACKEND}" > "build-artifacts/backend-images-${BUILD_NUMBER}.txt" || true
                             docker images "${IMAGE_NAME_FRONTEND}" > "build-artifacts/frontend-images-${BUILD_NUMBER}.txt" || true
+                            docker images "${IMAGE_NAME_DATABASE}" > "build-artifacts/database-images-${BUILD_NUMBER}.txt" || true
 
                             ls -lh build-artifacts
                             echo "========== Archiving Completed =========="
@@ -647,10 +1099,12 @@ EOF
                                 echo =============
                                 echo Backend Image: %IMAGE_NAME_BACKEND%:%BUILD_NUMBER%
                                 echo Frontend Image: %IMAGE_NAME_FRONTEND%:%BUILD_NUMBER%
+                                echo Database Image: %IMAGE_NAME_DATABASE%:%BUILD_NUMBER%
                             ) > "build-artifacts\\build-metadata-%BUILD_NUMBER%.txt"
 
                             docker images "%IMAGE_NAME_BACKEND%" > "build-artifacts\\backend-images-%BUILD_NUMBER%.txt" 2>nul
                             docker images "%IMAGE_NAME_FRONTEND%" > "build-artifacts\\frontend-images-%BUILD_NUMBER%.txt" 2>nul
+                            docker images "%IMAGE_NAME_DATABASE%" > "build-artifacts\\database-images-%BUILD_NUMBER%.txt" 2>nul
 
                             dir build-artifacts
                             echo ========== Archiving Completed ==========
@@ -691,6 +1145,7 @@ EOF
                 echo "Docker Images Ready:"
                 echo "  ${env.IMAGE_NAME_BACKEND}:${env.BUILD_NUMBER}"
                 echo "  ${env.IMAGE_NAME_FRONTEND}:${env.BUILD_NUMBER}"
+                echo "  ${env.IMAGE_NAME_DATABASE}:${env.BUILD_NUMBER}"
                 notifySlack('Pipeline', 'SUCCESS', 'good')
             }
         }
